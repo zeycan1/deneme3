@@ -1,1 +1,209 @@
-# deneme3
+# Flock Script
+## Flock'u servise çevirme
+İlk önce eğer screen ile çalıştırıyorsanız servisli çalıştırmaya döndürmeniz gerekiyor. Screen'e girip `CTRL + C` ile durdurun ve `exit` yazarak screen'i kapatın.
+[Validator](https://github.com/Core-Node-Team/Flock.io/blob/main/Validator.md)'u oluşturdunuz ve en sondaki servis komutuyla çalıştırıyorsanız bu servis oluşturmayı es geçin.
+Alttaki kod opsiyonel garanti olsun diye attım
+```
+cd
+source ~/.bashrc
+cd llm-loss-validator
+conda activate llm-loss-validator
+```
+Alttaki zorunlu servis yapmak için :D ( Alttaki servis kodunda (HUGGING KEY-FLOCK API-TASK ID) editlenecek yerler var. Atlamayın!)
+```
+sudo tee /etc/systemd/system/flockd.service > /dev/null << EOF
+[Unit]
+Description=Flock Validator Service
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/llm-loss-validator/src
+Environment="PATH=/root/anaconda3/envs/llm-loss-validator/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/bin/bash -c 'source /root/anaconda3/bin/activate llm-loss-validator && bash start.sh --hf_token BURAYA-HUGGİNG-KEY-YAZ --flock_api_key BURAYA-FLOCK-API-KEY-YAZ --task_id BURAYA-ID-YAZ --validation_args_file validation_config_cpu.json.example --auto_clean_cache True'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+Başlatalım
+```
+sudo systemctl daemon-reload
+sudo systemctl enable flockd
+sudo systemctl start flockd
+sudo journalctl -u flockd -f
+```
+## Flock Script'ini yükleme (kendi servisiyle)
+ ```
+cd
+nano flockd_update.sh
+ ```
+Aşağıdakini direkt yapıştırıp kaydedip çıkın
+```
+#!/bin/bash
+
+LOG_FILE="/var/log/flockd-updater.log"
+
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "$timestamp [$level] $message" | tee -a "$LOG_FILE"
+}
+
+# Flock loglarında son 10 dakika içinde "exit code" ifadesi olup olmadığını kontrol eder
+check_flockd_status() {
+    log "INFO" "Flockd hizmeti kontrol ediliyor..."
+    if sudo journalctl -u flockd --since "10 minutes ago" | grep -q "exit code"; then
+        log "ERROR" "Exit code bulundu. Güncelleme başlatılıyor..."
+        return 0
+    else
+        log "INFO" "Flockd düzgün çalışıyor."
+        return 1
+    fi
+}
+
+# Flock'u durdurur, güncellemeleri yapar ve yeniden başlatır
+update_flockd() {
+    log "INFO" "Flockd durduruluyor..."
+    sudo systemctl stop flockd || { log "ERROR" "Flockd durdurulamadı."; return 1; }
+
+    log "INFO" "Güncellemeler yapılıyor..."
+
+    # Proje dizinine geçiş
+    cd /root/llm-loss-validator || { log "ERROR" "Proje dizinine erişilemedi. Güncelleme başarısız oldu."; sudo systemctl start flockd; return 1; }
+
+    # Git'ten güncelleme çekme
+    git fetch origin && git pull origin main || { log "ERROR" "Git pull başarısız oldu."; sudo systemctl start flockd; return 1; }
+
+    # Conda ortamını kontrol et ve gerekirse kur
+    if ! /root/anaconda3/bin/conda env list | grep -w "llm-loss-validator" > /dev/null; then
+        log "INFO" "Conda ortamı kuruluyor..."
+        /root/anaconda3/bin/conda create -n llm-loss-validator python==3.10 -y || { log "ERROR" "Conda ortamı oluşturulamadı."; sudo systemctl start flockd; return 1; }
+    else
+        log "INFO" "Conda ortamı zaten mevcut."
+    fi
+
+    # Conda ortamını aktifleştirir
+    source /root/anaconda3/bin/activate llm-loss-validator || { log "ERROR" "Conda ortamı aktifleştirilemedi."; sudo systemctl start flockd; return 1; }
+    
+    # Gereksinimleri yükler
+    pip install -r /root/llm-loss-validator/requirements.txt || { log "ERROR" "Gereksinimler yüklenemedi."; sudo systemctl start flockd; return 1; }
+
+    log "INFO" "Flockd yeniden başlatılıyor..."
+    sudo systemctl restart flockd || { log "ERROR" "Flockd yeniden başlatılamadı."; return 1; }
+
+    log "INFO" "Güncelleme tamamlandı."
+    return 0
+}
+
+# Repo'da güncelleme var mı kontrol eder ve varsa çeker (servisi durdurmadan)
+check_and_update_repo() {
+    log "INFO" "Depoda güncelleme kontrol ediliyor..."
+
+    # Proje dizinine geçiş
+    cd /root/llm-loss-validator || { log "ERROR" "Proje dizinine erişilemedi. Güncelleme kontrolü başarısız oldu."; return 1; }
+
+    # Uzak branch'leri kontrol eder
+    git fetch origin
+
+    # Güncellemeleri karşılaştırır
+    LOCAL=$(git rev-parse @)
+    REMOTE=$(git rev-parse @{u})
+
+    if [ "$LOCAL" != "$REMOTE" ]; then
+        log "INFO" "Güncelleme mevcut, repo güncelleniyor..."
+        git pull origin main || { log "ERROR" "Git pull başarısız oldu."; return 1; }
+
+        # Conda ortamını kontrol et ve gerekirse kur
+        if ! /root/anaconda3/bin/conda env list | grep -w "llm-loss-validator" > /dev/null; then
+            log "INFO" "Conda ortamı kuruluyor..."
+            /root/anaconda3/bin/conda create -n llm-loss-validator python==3.10 -y || { log "ERROR" "Conda ortamı oluşturulamadı."; return 1; }
+        else
+            log "INFO" "Conda ortamı zaten mevcut."
+        fi
+
+        # Conda ortamını aktifleştirir
+        source /root/anaconda3/bin/activate llm-loss-validator || { log "ERROR" "Conda ortamı aktifleştirilemedi."; return 1; }
+        
+        # Gereksinimleri yükler
+        pip install -r /root/llm-loss-validator/requirements.txt || { log "ERROR" "Gereksinimler yüklenemedi."; return 1; }
+
+        log "INFO" "Repo güncellemesi tamamlandı."
+    else
+        log "INFO" "Repo zaten güncel."
+    fi
+    return 0
+}
+
+# Sonsuz döngüde Flock'u düzenli olarak kontrol eder ve ayrıca repo güncellemesini kontrol eder
+while true; do
+    if check_flockd_status; then
+        update_flockd
+    fi
+    
+    # Her 10 dakikada bir repo güncellemesini kontrol et
+    check_and_update_repo
+    
+    # 10 dakikada bir kontrol et (600 saniye)
+    sleep 600
+done
+```
+## Scriptin servis kodu
+```
+nano /etc/systemd/system/flockd-updater.service
+```
+Aşağıdakini direkt yapıştırıp kaydedip çıkın
+```
+[Unit]
+Description=Flock Validator Auto-Updater
+After=network.target
+    
+[Service]
+User=root
+WorkingDirectory=/root
+ExecStart=/bin/bash /root/flockd_update.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/flockd-updater.log
+StandardError=append:/var/log/flockd-updater-error.log
+KillMode=control-group
+TimeoutStopSec=30
+    
+[Install]
+WantedBy=multi-user.target
+```
+İzinleri verip başlatalım.
+```
+sudo chmod +x /root/flockd_update.sh
+sudo systemctl daemon-reload
+sudo systemctl enable flockd-updater
+sudo systemctl start flockd-updater
+```
+Tüm detayıyla log👇
+ ```
+sudo tail -f /var/log/flockd-updater.log -n 100
+ ```
+Scriptte hata varsa tespit logu👇
+ ```
+sudo tail -f /var/log/flockd-updater-error.log -n 100
+ ```
+## Log boyutu kontrolü için yapılmasını öneriyorum
+ ```
+sudo nano /etc/logrotate.d/flockd-updater
+ ```
+Alttakini yapıştırıp kaydedip çıkın
+ ```
+su root root
+
+/var/log/flockd-updater.log /var/log/flockd-updater-error.log {
+    size 50M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+}
+ ```
